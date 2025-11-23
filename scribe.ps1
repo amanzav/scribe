@@ -2,14 +2,14 @@ Param(
     [string]$MonitorFolder  # optional override; if not set, use config
 )
 
-Write-Host "Starting Sortify..."
+Write-Host "Starting Scribe..."
 Write-Host ""
 
 # ------------------------------
 # 1) Load config (config.json or config.example.json)
 # ------------------------------
-$scriptRoot  = $PSScriptRoot
-$configPath  = Join-Path $scriptRoot "config.json"
+$scriptRoot = $PSScriptRoot
+$configPath = Join-Path $scriptRoot "config.json"
 $examplePath = Join-Path $scriptRoot "config.example.json"
 
 if (Test-Path $configPath) {
@@ -49,7 +49,7 @@ Write-Host ""
 # 2) Load rules from config
 # ------------------------------
 $global:MonitorFolder = $MonitorFolder
-$global:SiteRules     = @{}
+$global:SiteRules = @{}
 
 if ($config.Rules) {
     # ConvertFrom-Json gives a PSCustomObject; convert its properties into a hashtable
@@ -59,22 +59,37 @@ if ($config.Rules) {
 }
 
 if ($global:SiteRules.Count -eq 0) {
-    Write-Host "WARNING: No rules found in config. Files will not be sorted."
+    Write-Host "WARNING: No rules found in config. Files will not be sorted by course."
 }
 
 # ------------------------------
-# 3) Clean old events on rerun
+# 3) Smart filename-based categories (within each course folder)
+# ------------------------------
+$global:SmartCategories = @(
+    @{ Name = "Solutions"; Patterns = @("solution", "solutions", "soln", "sols") }
+    @{ Name = "Assignments"; Patterns = @("assignment", "homework", "hw", "problem set", "pset") }
+    @{ Name = "Labs"; Patterns = @("lab", "laboratory") }
+    @{ Name = "Worksheets"; Patterns = @("worksheet", "worksheets", "practice", "exercise") }
+    @{ Name = "Lectures"; Patterns = @("lecture", "lectures", "slides") }
+    @{ Name = "Tutorials"; Patterns = @("tutorial", "tutorials", "tut") }
+    @{ Name = "Quizzes"; Patterns = @("quiz", "quizzes") }
+    @{ Name = "Exams"; Patterns = @("midterm", "mid-term", "exam", "final") }
+)
+
+
+# ------------------------------
+# 4) Clean old events on rerun
 # ------------------------------
 Unregister-Event -SourceIdentifier "DL_Created" -ErrorAction SilentlyContinue
 Unregister-Event -SourceIdentifier "DL_Renamed" -ErrorAction SilentlyContinue
 
 # ------------------------------
-# 4) Event action
+# 5) Event action
 # ------------------------------
 $action = {
-    $path       = $Event.SourceEventArgs.FullPath
+    $path = $Event.SourceEventArgs.FullPath
     $changeType = $Event.SourceEventArgs.ChangeType
-    $fileName   = [System.IO.Path]::GetFileName($path)
+    $fileName = [System.IO.Path]::GetFileName($path)
 
     # Skip temp download files
     if ($fileName -match '\.(crdownload|tmp|opdownload)$') { return }
@@ -97,11 +112,13 @@ $action = {
         $zone = Get-Content -Path $path -Stream Zone.Identifier -ErrorAction Stop
         $meta = $zone | Where-Object { $_ -match '^HostUrl=' -or $_ -match '^ReferrerUrl=' } | Select-Object -First 1
         if ($meta) { $url = $meta.Split('=')[1].Trim() }
-    } catch {}
+    }
+    catch {}
 
     if ($url) {
         Write-Host "  URL: $url"
-    } else {
+    }
+    else {
         Write-Host "  URL: <none>"
         return
     }
@@ -111,7 +128,7 @@ $action = {
         return
     }
 
-    # Match rule
+    # Match course rule
     $matchedKey = $null
     foreach ($key in $global:SiteRules.Keys) {
         if ($url -like $key) {
@@ -121,14 +138,41 @@ $action = {
     }
 
     if (-not $matchedKey) {
-        Write-Host "  No rule matched."
+        Write-Host "  No course rule matched."
         return
     }
 
-    $targetRel = $global:SiteRules[$matchedKey]
+    $baseRel = $global:SiteRules[$matchedKey]  # e.g. "University/MTE-252"
+
+    # --------------------------
+    # Smart filename categorization
+    # --------------------------
+    $lowerName = $fileName.ToLowerInvariant()
+    $category = $null
+
+    foreach ($cat in $global:SmartCategories) {
+        foreach ($p in $cat.Patterns) {
+            if ($lowerName -like ("*" + $p + "*")) {
+                $category = $cat.Name
+                break
+            }
+        }
+        if ($category) { break }
+    }
+
+    if ($category) {
+        $targetRel = Join-Path $baseRel $category   # e.g. "University/MTE-252/Solutions"
+    }
+    else {
+        $targetRel = $baseRel                       # no smart match, just course root
+    }
+
     $targetDir = Join-Path $global:MonitorFolder $targetRel
 
-    Write-Host "  Matched: $targetRel"
+    Write-Host "  Matched course: $baseRel"
+    if ($category) {
+        Write-Host "  Category: $category"
+    }
 
     # Create folder if missing
     if (-not (Test-Path $targetDir)) {
@@ -139,7 +183,7 @@ $action = {
     # Build final unique path
     $targetPath = Join-Path $targetDir $fileName
     $base = [System.IO.Path]::GetFileNameWithoutExtension($fileName)
-    $ext  = [System.IO.Path]::GetExtension($fileName)
+    $ext = [System.IO.Path]::GetExtension($fileName)
     $i = 1
     while (Test-Path $targetPath) {
         $targetPath = Join-Path $targetDir ("{0} ({1}){2}" -f $base, $i, $ext)
@@ -152,7 +196,7 @@ $action = {
 }
 
 # ------------------------------
-# 5) Watcher registration
+# 6) Watcher registration
 # ------------------------------
 $watcher = New-Object System.IO.FileSystemWatcher
 $watcher.Path = $MonitorFolder
@@ -164,6 +208,6 @@ Register-ObjectEvent $watcher Created -SourceIdentifier "DL_Created" -Action $ac
 Register-ObjectEvent $watcher Renamed -SourceIdentifier "DL_Renamed" -Action $action | Out-Null
 
 # ------------------------------
-# 6) Keep alive
+# 7) Keep alive
 # ------------------------------
 while ($true) { Start-Sleep -Seconds 1 }
