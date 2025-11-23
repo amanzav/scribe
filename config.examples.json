@@ -1,0 +1,7 @@
+{
+  "MonitorFolder": "C:/Users/YourName/Downloads",
+  "Rules": {
+    "*COURSE_ID_1*": "Folder/For/Course1",
+    "*COURSE_ID_2*": "Folder/For/Course2"
+  }
+}
