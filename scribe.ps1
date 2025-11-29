@@ -129,6 +129,14 @@ if ($global:DuplicatePolicy -notin @("rename", "skip", "overwrite")) {
 $global:DryRun = [bool]$DryRun
 
 # ------------------------------
+# Image handling
+# ------------------------------
+$global:ImageExtensions = @(
+    ".png", ".jpg", ".jpeg", ".gif",
+    ".bmp", ".tif", ".tiff", ".webp", ".heic"
+)
+
+# ------------------------------
 # 5) AI config (Groq for category classification)
 # ------------------------------
 $global:AIConfig = $null
@@ -357,12 +365,103 @@ function Process-ScribeFile {
 
     $fileName = [System.IO.Path]::GetFileName($Path)
 
+    # Skip temp download files
     if ($fileName -match '\.(crdownload|tmp|opdownload)$') { return }
+    # Skip folders
     if (Test-Path -LiteralPath $Path -PathType Container) { return }
 
     $dir = [System.IO.Path]::GetDirectoryName($Path)
     $dirFull = [System.IO.Path]::GetFullPath($dir)
     if ($dirFull -ne $global:MonitorFolder) { return }
+
+    # --------------------------
+    # Image special-case
+    # --------------------------
+    $ext = [System.IO.Path]::GetExtension($fileName)
+    $extLower = $ext.ToLowerInvariant()
+    $isImage = $global:ImageExtensions -contains $extLower
+
+    if ($isImage) {
+        # All images -> Downloads\Images
+        $base = [System.IO.Path]::GetFileNameWithoutExtension($fileName)
+
+        # Strip " (1)" style suffixes for canonical name
+        $canonicalBase = $base
+        if ($base -match '^(.*)\s+\((\d+)\)$') {
+            $canonicalBase = $matches[1]
+        }
+        $canonicalFileName = $canonicalBase + $ext
+
+        $targetRel = "Images"
+        $targetDir = Join-Path $global:MonitorFolder $targetRel
+        $targetPath = Join-Path $targetDir $canonicalFileName
+
+        # Duplicate handling for images too
+        if (Test-Path $targetPath) {
+            try {
+                $existingHash = Get-FileHash -Path $targetPath -Algorithm SHA256
+                $newHash = Get-FileHash -Path $Path       -Algorithm SHA256
+
+                if ($existingHash.Hash -eq $newHash.Hash) {
+                    # Same content → skip silently
+                    return
+                }
+                else {
+                    switch ($global:DuplicatePolicy) {
+                        "overwrite" {
+                            if ($global:DryRun) {
+                                $relative = $targetPath.Replace($global:MonitorFolder + '\', '')
+                                Log-Info "MOVE: $fileName -> $relative (image; overwrite)"
+                            }
+                            else {
+                                if (-not (Test-Path $targetDir)) {
+                                    New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+                                }
+                                Move-Item -LiteralPath $Path -Destination $targetPath -Force
+                                Log-Info "Moved: $fileName -> $targetRel (image; overwrite)"
+                            }
+                            return
+                        }
+                        "skip" {
+                            return
+                        }
+                        default {
+                            # fall through to rename logic
+                        }
+                    }
+                }
+            }
+            catch {
+                Log-Warn "Warning: couldn't hash image '$fileName', falling back to rename behavior."
+            }
+
+            # rename mode: Name (1).ext, Name (2).ext, ...
+            $i = 1
+            while (Test-Path $targetPath) {
+                $targetPath = Join-Path $targetDir ("{0} ({1}){2}" -f $canonicalBase, $i, $ext)
+                $i++
+            }
+        }
+
+        if ($global:DryRun) {
+            $relative = $targetPath.Replace($global:MonitorFolder + '\', '')
+            Log-Info "MOVE: $fileName -> $relative (image)"
+        }
+        else {
+            if (-not (Test-Path $targetDir)) {
+                New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+            }
+
+            Move-Item -LiteralPath $Path -Destination $targetPath
+            Log-Info "Moved: $fileName -> $targetRel (image)"
+        }
+
+        return
+    }
+
+    # --------------------------
+    # NON-IMAGE FILES: existing behavior (AI + course rules)
+    # --------------------------
 
     # URL from Zone.Identifier
     $url = $null
@@ -384,9 +483,7 @@ function Process-ScribeFile {
     $courseSrc = $courseInfo.Source
     $courseCode = $courseInfo.CourseCode
 
-    # --------------------------
     # Category: AI first, fallback to regex
-    # --------------------------
     $category = $null
     $categorySource = "none"
 
@@ -458,11 +555,8 @@ function Process-ScribeFile {
         $reasonText = " (" + ($reasonParts -join "; ") + ")"
     }
 
-    # --------------------------
     # Duplicate handling with "(1)" cleanup
-    # --------------------------
     $base = [System.IO.Path]::GetFileNameWithoutExtension($fileName)
-    $ext = [System.IO.Path]::GetExtension($fileName)
 
     $canonicalBase = $base
     if ($base -match '^(.*)\s+\((\d+)\)$') {
@@ -478,7 +572,6 @@ function Process-ScribeFile {
             $newHash = Get-FileHash -Path $Path       -Algorithm SHA256
 
             if ($existingHash.Hash -eq $newHash.Hash) {
-                # identical content → skip quietly
                 return
             }
             else {
@@ -493,7 +586,6 @@ function Process-ScribeFile {
                                 New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
                             }
                             Move-Item -LiteralPath $Path -Destination $targetPath -Force
-                            # was Log-Success → now plain white
                             Log-Info "Moved (overwrite): $fileName -> $targetRel$reasonText"
                         }
                         return
@@ -511,7 +603,6 @@ function Process-ScribeFile {
             Log-Warn "Warning: couldn't hash files for '$fileName', falling back to rename behavior."
         }
 
-        # rename mode (or hash failed): Name (1).ext, Name (2).ext, ...
         $i = 1
         while (Test-Path $targetPath) {
             $targetPath = Join-Path $targetDir ("{0} ({1}){2}" -f $canonicalBase, $i, $ext)
@@ -529,7 +620,6 @@ function Process-ScribeFile {
         }
 
         Move-Item -LiteralPath $Path -Destination $targetPath
-        # was Log-Success → now plain white
         Log-Info "Moved: $fileName -> $targetRel$reasonText"
     }
 }
